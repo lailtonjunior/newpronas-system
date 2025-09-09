@@ -1,0 +1,219 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_STAGING: pronas-pcd-staging
+  EKS_CLUSTER_PRODUCTION: pronas-pcd-production
+
+jobs:
+  # Deploy to Staging
+  deploy-staging:
+    if: github.ref == 'refs/heads/main' || github.event.inputs.environment == 'staging'
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_STAGING }} --region ${{ env.AWS_REGION }}
+    
+    - name: Install Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: '3.12.0'
+    
+    - name: Deploy with Helm
+      run: |
+        helm upgrade --install pronas-pcd ./infrastructure/helm \
+          --namespace staging \
+          --create-namespace \
+          --set environment=staging \
+          --set image.tag=${{ github.sha }} \
+          --values ./infrastructure/helm/values.staging.yaml \
+          --wait \
+          --timeout 10m
+    
+    - name: Run smoke tests
+      run: |
+        kubectl run smoke-test --image=curlimages/curl:latest --rm -i --restart=Never -- \
+          curl -f http://pronas-pcd-api.staging.svc.cluster.local/health
+    
+    - name: Notify Slack
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        text: 'Staging deployment ${{ job.status }}'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+      if: always()
+
+  # Deploy to Production
+  deploy-production:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.environment == 'production'
+    runs-on: ubuntu-latest
+    environment: production
+    needs: deploy-staging
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_PRODUCTION }} --region ${{ env.AWS_REGION }}
+    
+    - name: Install Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: '3.12.0'
+    
+    - name: Blue-Green Deployment
+      run: |
+        # Deploy to Green environment
+        helm upgrade --install pronas-pcd-green ./infrastructure/helm \
+          --namespace production \
+          --create-namespace \
+          --set environment=production \
+          --set deployment.strategy=green \
+          --set image.tag=${{ github.ref_name }} \
+          --values ./infrastructure/helm/values.production.yaml \
+          --wait \
+          --timeout 15m
+        
+        # Run health checks
+        kubectl run health-check --image=curlimages/curl:latest --rm -i --restart=Never -- \
+          curl -f http://pronas-pcd-green.production.svc.cluster.local/health
+        
+        # Switch traffic to Green
+        kubectl patch service pronas-pcd-lb -n production \
+          -p '{"spec":{"selector":{"deployment":"green"}}}'
+        
+        # Wait and monitor
+        sleep 60
+        
+        # Scale down Blue deployment
+        kubectl scale deployment pronas-pcd-blue -n production --replicas=0
+    
+    - name: Run production tests
+      run: |
+        ./scripts/production-tests.sh
+    
+    - name: Rollback on failure
+      if: failure()
+      run: |
+        kubectl patch service pronas-pcd-lb -n production \
+          -p '{"spec":{"selector":{"deployment":"blue"}}}'
+        kubectl scale deployment pronas-pcd-blue -n production --replicas=3
+    
+    - name: Create Release Notes
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref_name }}
+        release_name: Release ${{ github.ref_name }}
+        body: |
+          ## Changes in this Release
+          - Automated deployment to production
+          - See commit history for details
+        draft: false
+        prerelease: false
+    
+    - name: Notify Teams
+      uses: jdcargile/ms-teams-notification@v1.3
+      with:
+        github-token: ${{ github.token }}
+        ms-teams-webhook-uri: ${{ secrets.TEAMS_WEBHOOK }}
+        notification-summary: Production Deployment ${{ job.status }}
+        notification-color: ${{ job.status == 'success' && '00FF00' || 'FF0000' }}
+      if: always()
+
+  # Database Migrations
+  database-migrations:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install alembic psycopg2-binary
+    
+    - name: Run migrations on staging
+      if: github.ref == 'refs/heads/main'
+      env:
+        DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+      run: |
+        cd services/auth-service
+        alembic upgrade head
+        cd ../projects-service
+        alembic upgrade head
+    
+    - name: Run migrations on production
+      if: startsWith(github.ref, 'refs/tags/v')
+      env:
+        DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+      run: |
+        cd services/auth-service
+        alembic upgrade head
+        cd ../projects-service
+        alembic upgrade head
+
+  # Performance Tests
+  performance-tests:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run K6 Load Tests
+      uses: grafana/k6-action@v0.3.0
+      with:
+        filename: tests/performance/load-test.js
+        flags: --out cloud
+      env:
+        K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
+        TARGET_URL: https://staging.pronas-pcd.gov.br
+    
+    - name: Analyze results
+      run: |
+        echo "Performance test results available at K6 Cloud Dashboard"

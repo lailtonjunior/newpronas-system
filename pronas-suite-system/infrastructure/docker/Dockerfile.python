@@ -1,61 +1,22 @@
-# Base image for Python services
+# ---- Base Stage ----
 FROM python:3.11-slim as base
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    libpq-dev \
-    libssl-dev \
-    libffi-dev \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY ./requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Set working directory
+# ---- Final Stage ----
+FROM python:3.11-slim as final
 WORKDIR /app
 
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Production image
-FROM base as production
-
-# Copy application code
-COPY src/ ./src/
-COPY alembic.ini ./
-COPY alembic/ ./alembic/
-
-# Create non-root user
-RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app
-
+RUN useradd -m -u 1000 appuser
 USER appuser
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+COPY --from=base /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY ./src ./src
 
-# Run application
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+EXPOSE 8000
 
-# Development image
-FROM base as development
-
-# Install development dependencies
-RUN pip install --no-cache-dir \
-    pytest \
-    pytest-asyncio \
-    pytest-cov \
-    pytest-mock \
-    black \
-    flake8 \
-    mypy \
-    ipython
-
-# Copy all files for development
-COPY . .
-
-# Run in reload mode for development
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

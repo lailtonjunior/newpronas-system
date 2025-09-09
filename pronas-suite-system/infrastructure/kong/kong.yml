@@ -1,0 +1,48 @@
+_format_version: "2.1"
+
+services:
+- name: auth-service
+  url: http://auth-service:8000
+- name: projects-service
+  url: http://projects-service:8000
+- name: institutions-service
+  url: http://institutions-service:8000
+- name: ai-service
+  url: http://ai-service:8000
+
+routes:
+- name: auth-routes
+  service: auth-service
+  paths:
+  - /auth
+- name: projects-routes
+  service: projects-service
+  paths:
+  - /projects
+  plugins:
+  - name: rate-limiting
+    config:
+      minute: 100
+      policy: local
+  # Descomente a linha abaixo quando o JWT estiver implementado no frontend
+  # - name: jwt
+- name: institutions-routes
+  service: institutions-service
+  paths:
+  - /institutions
+  plugins:
+  - name: rate-limiting
+    config:
+      minute: 100
+      policy: local
+  # - name: jwt
+- name: ai-routes
+  service: ai-service
+  paths:
+  - /ai
+  plugins:
+  - name: rate-limiting
+    config:
+      minute: 50
+      policy: local
+  # - name: jwt

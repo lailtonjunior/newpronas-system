@@ -20,8 +20,11 @@ WORKDIR /home/appuser/app
 # Copiar apenas o ambiente virtual e o código fonte
 COPY --from=builder /opt/venv /opt/venv
 COPY ./src ./src
+COPY ./alembic.ini .
+COPY ./alembic ./alembic
 
 ENV PATH="/opt/venv/bin:$PATH"
 EXPOSE 8000
 
+# O comando será sobrescrito no docker-compose para rodar as migrações
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

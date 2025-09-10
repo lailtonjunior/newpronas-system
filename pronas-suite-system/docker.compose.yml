@@ -9,8 +9,6 @@ volumes:
   redis_data:
   elasticsearch_data:
   minio_data:
-  prometheus_data:
-  grafana_data:
 
 services:
   # ----------------- INFRASTRUCTURE -----------------
@@ -33,7 +31,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ... (outros serviços de infra como redis, elasticsearch, minio - sem alterações) ...
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes
@@ -49,18 +46,52 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
-    
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=false
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - pronas-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - pronas-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
   # ----------------- BACKEND SERVICES -----------------
   auth-service:
     build:
       context: ./services/auth-service
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-    depends_on:
-      postgres:
-        condition: service_healthy
     ports:
       - "8001:8000"
     networks:
@@ -72,9 +103,10 @@ services:
       context: ./services/ai-service
     environment:
       - ELASTICSEARCH_URL=${ELASTICSEARCH_URL}
+      - CATALOG_SERVICE_URL=${CATALOG_SERVICE_URL}
     depends_on:
-      elasticsearch:
-        condition: service_healthy
+      - elasticsearch
+      - catalog-service
     ports:
       - "8002:8000"
     networks:
@@ -86,15 +118,11 @@ services:
       context: ./services/projects-service
     environment:
       - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL}
-      - AI_SERVICE_URL=${AI_SERVICE_URL}
-    # Comando para rodar migrações antes de iniciar o servidor
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
     command: sh -c "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port 8000"
     depends_on:
       postgres:
         condition: service_healthy
-      ai-service:
-        condition: service_started
     ports:
       - "8003:8000"
     networks:
@@ -106,11 +134,29 @@ services:
       context: ./services/institutions-service
     environment:
       - DATABASE_URL=${DATABASE_URL}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+    command: sh -c "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port 8000"
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "8004:8000"
+    networks:
+      - pronas-network
+    restart: unless-stopped
+  
+  catalog-service:
+    build:
+      context: ./services/catalog-service
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+    command: sh -c "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port 8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8005:8000"
     networks:
       - pronas-network
     restart: unless-stopped
@@ -129,7 +175,7 @@ services:
       - kong
     restart: unless-stopped
 
-  # ... (outros serviços como kong, prometheus, grafana - sem alterações) ...
+  # ----------------- API GATEWAY -----------------
   kong:
     image: kong:3.4-alpine
     environment:
@@ -143,9 +189,9 @@ services:
     volumes:
       - ./infrastructure/kong:/kong/declarative
     ports:
-      - "8080:8000"  # Proxy
-      - "8443:8443"  # Proxy SSL
-      - "8081:8001"  # Admin API
+      - "8080:8000"
+      - "8443:8443"
+      - "8081:8001"
     networks:
       - pronas-network
     restart: unless-stopped

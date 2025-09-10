@@ -1,48 +1,45 @@
-_format_version: "2.1"
+_format_version: "3.0"
+_comment: "Declarative Kong configuration for PRONAS/PCD System"
 
 services:
 - name: auth-service
   url: http://auth-service:8000
+  routes:
+  - name: auth-routes
+    paths:
+    - /auth
+
 - name: projects-service
   url: http://projects-service:8000
+  routes:
+  - name: projects-routes
+    paths:
+    - /projects
+
 - name: institutions-service
   url: http://institutions-service:8000
+  routes:
+  - name: institutions-routes
+    paths:
+    - /institutions
+
 - name: ai-service
   url: http://ai-service:8000
+  routes:
+  - name: ai-routes
+    paths:
+    - /ai
 
-routes:
-- name: auth-routes
-  service: auth-service
-  paths:
-  - /auth
-- name: projects-routes
-  service: projects-service
-  paths:
-  - /projects
-  plugins:
-  - name: rate-limiting
-    config:
-      minute: 100
-      policy: local
-  # Descomente a linha abaixo quando o JWT estiver implementado no frontend
-  # - name: jwt
-- name: institutions-routes
-  service: institutions-service
-  paths:
-  - /institutions
-  plugins:
-  - name: rate-limiting
-    config:
-      minute: 100
-      policy: local
-  # - name: jwt
-- name: ai-routes
-  service: ai-service
-  paths:
-  - /ai
-  plugins:
-  - name: rate-limiting
-    config:
-      minute: 50
-      policy: local
-  # - name: jwt
+- name: catalog-service
+  url: http://catalog-service:8000
+  routes:
+  - name: catalog-routes
+    paths:
+    - /catalog
+
+- name: frontend-service
+  url: http://frontend:3000
+  routes:
+  - name: frontend-routes
+    paths:
+    - /
